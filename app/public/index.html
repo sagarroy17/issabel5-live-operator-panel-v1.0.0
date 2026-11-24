@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Operator Panel</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Enable class-based dark mode in Tailwind CSS
+        tailwind.config = {
+            darkMode: 'class'
+        };
+    </script>
+    <script src="/op-panel/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-50 text-slate-900 dark:bg-[#0b1120] dark:text-white p-4 font-sans select-none transition-colors duration-200">
+
+    <!-- Compact Header Section with Theme Toggle Button -->
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 pb-3 border-b border-slate-200 dark:border-slate-800 gap-2">
+        <div>
+            <h1 class="text-lg font-bold tracking-tight text-slate-900 dark:text-white">Live Operator Panel (FOP2 Style)</h1>
+            <p class="text-slate-500 dark:text-slate-400 text-xs">Real-time extension & trunk monitor with IP address, registration uptime, call timer, hangup & reset controls.</p>
+        </div>
+        <div class="flex items-center gap-2">
+            <!-- Light / Dark Theme Toggle Button -->
+            <button id="theme-toggle" onclick="toggleTheme()" title="Switch Light / Dark Theme"
+                    class="flex items-center gap-1.5 text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-200 dark:border-slate-700 px-3 py-1 rounded-full shadow-sm transition">
+                <span id="theme-icon">☀️</span>
+                <span id="theme-label">Light Mode</span>
+            </button>
+
+            <!-- AMI Connection Status Badge -->
+            <div class="flex items-center gap-2 text-xs font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 dark:text-emerald-400 dark:bg-emerald-950/50 dark:border-emerald-800/60 px-3 py-1 rounded-full">
+                <span class="w-2 h-2 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse"></span>
+                <span>AMI Live Connected</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Extensions Grid Section -->
+    <div class="mb-6">
+        <div class="flex items-center gap-2 mb-2.5">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-300">Extensions</h2>
+            <span id="ext-count" class="text-[11px] font-semibold bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 px-2 py-0.5 rounded-full">0</span>
+        </div>
+        <div id="extension-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5"></div>
+    </div>
+
+    <!-- SIP / IAX Trunks Grid Section -->
+    <div class="pt-4 border-t border-slate-200 dark:border-slate-800">
+        <div class="flex items-center gap-2 mb-2.5">
+            <h2 class="text-xs font-bold uppercase tracking-wider text-cyan-700 dark:text-cyan-400">SIP / IAX Trunks</h2>
+            <span id="trunk-count" class="text-[11px] font-semibold bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300 px-2 py-0.5 rounded-full">0</span>
+        </div>
+        <div id="trunk-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2.5"></div>
+    </div>
+
+    <script>
+        // Theme initialization and toggle logic (Default: dark, persisted in localStorage)
+        function applyTheme(theme) {
+            const htmlEl = document.documentElement;
+            const iconEl = document.getElementById('theme-icon');
+            const labelEl = document.getElementById('theme-label');
+
+            if (theme === 'light') {
+                htmlEl.classList.remove('dark');
+                if (iconEl) iconEl.innerText = '🌙';
+                if (labelEl) labelEl.innerText = 'Dark Mode';
+            } else {
+                htmlEl.classList.add('dark');
+                if (iconEl) iconEl.innerText = '☀️';
+                if (labelEl) labelEl.innerText = 'Light Mode';
+            }
+        }
+
+        function toggleTheme() {
+            const isCurrentlyDark = document.documentElement.classList.contains('dark');
+            const nextTheme = isCurrentlyDark ? 'light' : 'dark';
+            localStorage.setItem('op_panel_theme', nextTheme);
+            applyTheme(nextTheme);
+        }
+
+        // Apply saved theme immediately on page load
+        const savedTheme = localStorage.getItem('op_panel_theme') || 'dark';
+        applyTheme(savedTheme);
+
+        const socket = io({ path: '/op-panel/socket.io' });
+        const activeTimers = {};   // Active call start timestamps
+        const regTimers = {};      // Registration start timestamps
+        const regCache = {};       // Cached registration info
+
+        // Format active call duration (MM:SS or HH:MM:SS)
+        function formatCallDuration(ms) {
+            const totalSec = Math.max(0, Math.floor(ms / 1000));
+            const hrs = Math.floor(totalSec / 3600);
+            const mins = Math.floor((totalSec % 3600) / 60);
+            const secs = totalSec % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            return hrs > 0 ? `${pad(hrs)}:${pad(mins)}:${pad(secs)}` : `${pad(mins)}:${pad(secs)}`;
+        }
+
+        // Format registration uptime (HH:MM:SS or Xd HH:MM:SS)
+        function formatRegUptime(ms) {
+            const totalSec = Math.max(0, Math.floor(ms / 1000));
+            const days = Math.floor(totalSec / 86400);
+            const hrs = Math.floor((totalSec % 86400) / 3600);
+            const mins = Math.floor((totalSec % 3600) / 60);
+            const secs = totalSec % 60;
+            const pad = (n) => String(n).padStart(2, '0');
+            const timeStr = `${pad(hrs)}:${pad(mins)}:${pad(secs)}`;
+            return days > 0 ? `${days}d ${timeStr}` : timeStr;
+        }
+
+        // Update active call timers and registration uptime timers every second
+        setInterval(() => {
+            const now = Date.now();
+
+            // Update active call timers
+            Object.keys(activeTimers).forEach(peer => {
+                const startTime = activeTimers[peer];
+                const timerEl = document.getElementById(`timer-${peer}`);
+                if (startTime && timerEl) {
+                    timerEl.innerText = formatCallDuration(now - startTime);
+                }
+            });
+
+            // Update registration uptime timers
+            Object.keys(regTimers).forEach(peer => {
+                const regSince = regTimers[peer];
+                const regTimeEl = document.getElementById(`regtime-${peer}`);
+                if (regSince && regTimeEl) {
+                    regTimeEl.innerText = `Up ${formatRegUptime(now - regSince)}`;
+                }
+            });
+        }, 1000);
+
+        // Fetch and render extension cards
+        async function loadExtensions() {
+            const res = await fetch('/op-panel/api/extensions');
+            const extensions = await res.json();
+            document.getElementById('ext-count').innerText = extensions.length;
+            const grid = document.getElementById('extension-grid');
+            grid.innerHTML = '';
+
+            extensions.forEach(ext => {
+                const card = document.createElement('div');
+                card.id = `card-${ext.extension}`;
+                card.className = "bg-white dark:bg-[#131c31] border border-slate-200 dark:border-slate-800 rounded-lg p-2.5 transition-all duration-150 shadow-sm dark:shadow";
+
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-blue-600 dark:text-[#60a5fa] font-bold text-sm">#${ext.extension}</span>
+                        <div class="flex items-center gap-1">
+                            <span id="timer-${ext.extension}" class="hidden text-[10px] font-mono font-bold bg-rose-100 text-rose-700 border border-rose-300 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-700/60 px-1.5 py-0.2 rounded">00:00</span>
+                            <span id="status-${ext.extension}" class="text-[10px] font-bold tracking-wider uppercase text-slate-500 dark:text-slate-400">IDLE</span>
+                        </div>
+                    </div>
+                    <div class="text-xs font-semibold text-slate-800 dark:text-white truncate mb-1.5" title="${ext.name || ext.extension}">
+                        ${ext.name || 'Ext ' + ext.extension}
+                    </div>
+                    <div class="bg-slate-100 dark:bg-[#0b1120]/70 px-1.5 py-1 rounded border border-slate-200 dark:border-slate-800/80 mb-2 space-y-1">
+                        <div class="flex items-center justify-between gap-1">
+                            <span id="ip-${ext.extension}" class="text-[10px] font-mono text-slate-500 truncate">No IP</span>
+                            <span id="reg-${ext.extension}" class="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400 shrink-0">Unregistered</span>
+                        </div>
+                        <div class="flex items-center justify-between text-[10px] border-t border-slate-200 dark:border-slate-800/70 pt-0.5">
+                            <span class="text-slate-500">Reg Time:</span>
+                            <span id="regtime-${ext.extension}" class="font-mono text-slate-500">Offline</span>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-1.5">
+                        <button onclick="resetExt('${ext.extension}')" title="Reset hung extension to normal state"
+                                class="bg-amber-50 hover:bg-amber-500 text-amber-700 hover:text-white dark:bg-[#1e293b] dark:hover:bg-amber-600 dark:text-amber-300 dark:hover:text-white text-[11px] font-semibold py-1 rounded border border-amber-300 dark:border-slate-700 transition">
+                            Reset
+                        </button>
+                        <button id="hangup-${ext.extension}" onclick="hangupExt('${ext.extension}')"
+                                class="opacity-40 pointer-events-none bg-rose-50 hover:bg-rose-600 text-rose-700 hover:text-white dark:bg-[#4c1d24] dark:hover:bg-rose-600 dark:text-rose-200 dark:hover:text-white text-[11px] font-semibold py-1 rounded border border-rose-300 dark:border-rose-900 transition">
+                            Hangup
+                        </button>
+                    </div>
+                `;
+                grid.appendChild(card);
+                if (regCache[ext.extension] !== undefined) {
+                    updateRegUI(ext.extension, regCache[ext.extension], false);
+                }
+            });
+        }
+
+        // Fetch and render trunk cards
+        async function loadTrunks() {
+            const res = await fetch('/op-panel/api/trunks');
+            const trunks = await res.json();
+            document.getElementById('trunk-count').innerText = trunks.length;
+            const grid = document.getElementById('trunk-grid');
+            grid.innerHTML = '';
+
+            trunks.forEach(tr => {
+                const key = tr.key;
+                const techLabel = (tr.tech || 'SIP').toUpperCase();
+                const card = document.createElement('div');
+                card.id = `card-${key}`;
+                card.dataset.isTrunk = 'true';
+                card.className = "bg-white dark:bg-[#11192c] border border-slate-200 dark:border-slate-800 rounded-lg p-2.5 transition-all duration-150 shadow-sm dark:shadow";
+
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="text-cyan-700 dark:text-cyan-400 font-bold text-xs truncate">${techLabel}/${key}</span>
+                        <div class="flex items-center gap-1">
+                            <span id="timer-${key}" class="hidden text-[10px] font-mono font-bold bg-rose-100 text-rose-700 border border-rose-300 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-700/60 px-1.5 py-0.2 rounded">00:00</span>
+                            <span id="status-${key}" class="text-[10px] font-bold tracking-wider uppercase text-slate-500 dark:text-slate-400">IDLE</span>
+                        </div>
+                    </div>
+                    <div class="text-xs font-medium text-slate-800 dark:text-slate-200 truncate mb-1.5">${tr.name || key}</div>
+                    <div class="bg-slate-100 dark:bg-[#0b1120]/70 px-1.5 py-1 rounded border border-slate-200 dark:border-slate-800/80 space-y-1">
+                        <div class="flex items-center justify-between gap-1">
+                            <span id="ip-${key}" class="text-[10px] font-mono text-slate-500 truncate">No IP</span>
+                            <span id="reg-${key}" class="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 dark:bg-rose-950/70 dark:text-rose-300 shrink-0">Trunk Un-Registered</span>
+                        </div>
+                        <div class="flex items-center justify-between text-[10px] border-t border-slate-200 dark:border-slate-800/70 pt-0.5">
+                            <span class="text-slate-500">Reg Time:</span>
+                            <span id="regtime-${key}" class="font-mono text-slate-500">Offline</span>
+                        </div>
+                    </div>
+                `;
+                grid.appendChild(card);
+                if (regCache[key] !== undefined) {
+                    updateRegUI(key, regCache[key], true);
+                }
+            });
+        }
+
+        // Update registration badge, IP address, and registration uptime timer
+        function updateRegUI(peer, info, forceTrunk = null) {
+            if (!info) return;
+            regCache[peer] = info;
+            const badge = document.getElementById(`reg-${peer}`);
+            const ipEl = document.getElementById(`ip-${peer}`);
+            const regTimeEl = document.getElementById(`regtime-${peer}`);
+            const card = document.getElementById(`card-${peer}`);
+            if (!badge || !card) return;
+
+            const isTrunk = forceTrunk !== null ? forceTrunk : (card.dataset.isTrunk === 'true');
+            const isRegistered = !!info.registered;
+            const ip = info.ip || '';
+            const regSince = info.regSince || null;
+
+            if (ipEl) {
+                if (isRegistered && ip) {
+                    ipEl.innerText = ip;
+                    ipEl.className = 'text-[10px] font-mono font-semibold text-emerald-700 dark:text-emerald-300 truncate';
+                } else {
+                    ipEl.innerText = 'No IP';
+                    ipEl.className = 'text-[10px] font-mono text-slate-500 truncate';
+                }
+            }
+
+            if (regTimeEl) {
+                if (isRegistered && regSince) {
+                    regTimers[peer] = regSince;
+                    regTimeEl.innerText = `Up ${formatRegUptime(Date.now() - regSince)}`;
+                    regTimeEl.className = 'font-mono font-semibold text-sky-700 dark:text-sky-300';
+                } else {
+                    delete regTimers[peer];
+                    regTimeEl.innerText = 'Offline';
+                    regTimeEl.className = 'font-mono text-slate-500';
+                }
+            }
+
+            if (isTrunk) {
+                if (isRegistered) {
+                    badge.innerText = 'Trunk Registered';
+                    badge.className = 'text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/90 dark:text-emerald-300 dark:border-emerald-700/70 shrink-0';
+                } else {
+                    badge.innerText = 'Trunk Un-Registered';
+                    badge.className = 'text-[9px] font-semibold px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 border border-rose-300 dark:bg-rose-950/70 dark:text-rose-300 dark:border-rose-800/60 shrink-0';
+                }
+            } else {
+                if (isRegistered) {
+                    badge.innerText = 'Registered';
+                    badge.className = 'text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300 dark:bg-emerald-950/90 dark:text-emerald-300 dark:border-emerald-700/70 shrink-0';
+                } else {
+                    badge.innerText = 'Unregistered';
+                    badge.className = 'text-[9px] font-semibold px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400 shrink-0';
+                }
+            }
+        }
+
+        // Update call status, card border highlights, and live call timer
+        function updateCardUI(peer, status, startTime = null) {
+            const card = document.getElementById(`card-${peer}`);
+            const statusText = document.getElementById(`status-${peer}`);
+            const timerEl = document.getElementById(`timer-${peer}`);
+            const hangupBtn = document.getElementById(`hangup-${peer}`);
+            if (!card) return;
+
+            statusText.innerText = status;
+            card.classList.remove(
+                'border-slate-200', 'dark:border-slate-800',
+                'border-rose-500', 'bg-rose-50', 'dark:bg-[#1f1627]',
+                'border-amber-500', 'bg-amber-50', 'dark:bg-[#211d18]'
+            );
+            statusText.classList.remove(
+                'text-slate-500', 'dark:text-slate-400',
+                'text-rose-600', 'dark:text-rose-400',
+                'text-amber-600', 'dark:text-amber-400'
+            );
+
+            if (status === 'INCALL') {
+                card.classList.add('border-rose-500', 'bg-rose-50', 'dark:bg-[#1f1627]');
+                statusText.classList.add('text-rose-600', 'dark:text-rose-400');
+                if (hangupBtn) hangupBtn.classList.remove('opacity-40', 'pointer-events-none');
+                if (timerEl) {
+                    activeTimers[peer] = startTime || activeTimers[peer] || Date.now();
+                    timerEl.innerText = formatCallDuration(Date.now() - activeTimers[peer]);
+                    timerEl.classList.remove('hidden');
+                }
+            } else if (status === 'RINGING') {
+                card.classList.add('border-amber-500', 'bg-amber-50', 'dark:bg-[#211d18]');
+                statusText.classList.add('text-amber-600', 'dark:text-amber-400');
+                if (hangupBtn) hangupBtn.classList.remove('opacity-40', 'pointer-events-none');
+                if (timerEl) {
+                    delete activeTimers[peer];
+                    timerEl.classList.add('hidden');
+                }
+            } else {
+                card.classList.add('border-slate-200', 'dark:border-slate-800');
+                statusText.classList.add('text-slate-500', 'dark:text-slate-400');
+                if (hangupBtn) hangupBtn.classList.add('opacity-40', 'pointer-events-none');
+                if (timerEl) {
+                    delete activeTimers[peer];
+                    timerEl.classList.add('hidden');
+                    timerEl.innerText = '00:00';
+                }
+            }
+        }
+
+        // Socket.io event listeners
+        socket.on('initial_state', ({ statuses, startTimes, registrations }) => {
+            if (registrations) {
+                Object.keys(registrations).forEach(peer => updateRegUI(peer, registrations[peer]));
+            }
+            if (statuses) {
+                Object.keys(statuses).forEach(peer => updateCardUI(peer, statuses[peer], startTimes ? startTimes[peer] : null));
+            }
+        });
+
+        socket.on('reg_status', ({ peer, registered, ip, regSince }) => {
+            updateRegUI(peer, { registered, ip, regSince });
+        });
+
+        socket.on('ext_status', ({ exten, status, startTime }) => {
+            updateCardUI(exten, status, startTime);
+        });
+
+        // Reset button action
+        function resetExt(targetExten) {
+            socket.emit('action_reset', { exten: targetExten });
+            updateCardUI(targetExten, 'IDLE', null);
+        }
+
+        // Hangup button action
+        function hangupExt(targetExten) {
+            socket.emit('action_hangup', { exten: targetExten });
+        }
+
+        // Initialize panel data
+        async function initPanel() {
+            await Promise.all([loadExtensions(), loadTrunks()]);
+            Object.keys(regCache).forEach(peer => updateRegUI(peer, regCache[peer]));
+        }
+
+        initPanel();
+    </script>
+</body>
+</html>
