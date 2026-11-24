@@ -1,4 +1,4 @@
-# Issabel 5 Live Operator Panel (FOP2 Style)
+# Issabel 5 Live Operator Panel V1.0.0 (FOP2 Style)
 
 A lightweight, real-time web-based Live Operator Panel designed specifically for **Issabel 5** (Asterisk 18 / PJSIP & SIP). Monitor extensions and trunks in an Elastix 4-inspired compact grid with real-time IP addresses, registration uptime timers, active call durations, hangup controls, and hung-channel reset capabilities.
 
